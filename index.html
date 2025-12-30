@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>WebVTT Player</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="title">WebVTT Player</div>
+
+    <div class="controls-top">
+      <label class="filebtn">
+        動画
+        <input id="videoFile" type="file" accept="video/*" />
+      </label>
+
+      <label class="filebtn">
+        字幕（.vtt）
+        <input id="vttFile" type="file" accept=".vtt,text/vtt" />
+      </label>
+    </div>
+  </header>
+
+  <main class="stage">
+    <div id="player" class="player">
+
+      <!-- 映像表示フレーム（video/字幕の共通座標系） -->
+      <div id="frame" class="frame">
+        <video id="video" playsinline preload="metadata"></video>
+
+        <!-- 字幕レイヤー：frameと完全一致 -->
+        <div class="overlay" aria-live="off">
+          <div id="subtitleViewport" class="subtitle-viewport"></div>
+        </div>
+      </div>
+
+      <!-- 独自コントロール -->
+      <div id="hud" class="hud">
+        <div class="hud-row">
+          <button id="btnPlay" class="btn" type="button" aria-label="再生/一時停止">▶</button>
+          <button id="btnBack" class="btn" type="button" aria-label="5秒戻る">↺5</button>
+          <button id="btnFwd" class="btn" type="button" aria-label="5秒進む">↻5</button>
+
+          <div class="time">
+            <span id="curTime">0:00</span>
+            <span class="sep">/</span>
+            <span id="durTime">0:00</span>
+          </div>
+
+          <button id="btnMute" class="btn" type="button" aria-label="ミュート切替">🔊</button>
+          <input id="vol" class="range" type="range" min="0" max="1" step="0.01" value="1" aria-label="音量" />
+
+          <select id="speed" class="select" aria-label="再生速度">
+            <option value="0.5">0.5x</option>
+            <option value="0.75">0.75x</option>
+            <option value="1" selected>1x</option>
+            <option value="1.25">1.25x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2x</option>
+          </select>
+
+          <!-- アスペクト比プリセット -->
+          <select id="aspect" class="select" aria-label="アスペクト比">
+            <option value="auto" selected>Auto</option>
+            <option value="16:9">16:9</option>
+            <option value="4:3">4:3</option>
+            <option value="1:1">1:1</option>
+          </select>
+
+          <button id="btnCC" class="btn" type="button" aria-label="字幕ON/OFF">CC</button>
+          <button id="btnFS" class="btn" type="button" aria-label="フルスクリーン">⛶</button>
+        </div>
+
+        <div class="hud-row hud-row2">
+          <input id="seek" class="seek" type="range" min="0" max="1000" value="0" step="1" aria-label="シーク" />
+        </div>
+      </div>
+
+      <div id="hint" class="hint">
+        上のボタンで「動画」と「VTT」を読み込んでね
+      </div>
+    </div>
+  </main>
+
+  <script src="main.js"></script>
+</body>
+</html>
