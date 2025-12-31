@@ -1,9 +1,9 @@
 // main.js — Perfect WebVTT renderer + custom controls
-// IMPORTANT:
 // - Video + subtitle overlay share the same "frame" rect (aspect-fit).
-// - If you still see center drift (device/browser rendering quirks),
-//   we apply a global subtitle offset (shift cues only, not the viewport).
-//   This keeps clipping correct while visually aligning centers.
+// - Subtitle drift is compensated by a global offset (applied to cue positions).
+// - Offset can be tuned via top-right subtitle settings panel (5px step) and persisted.
+// - Bottom HUD auto-hides after 3 seconds of no interaction (when playing). Any interaction shows it.
+// - .srt is supported in a simple way (no positioning/style directives).
 
 // ==========================
 // Elements
@@ -14,10 +14,11 @@ const frame = document.getElementById("frame");
 const subtitleViewport = document.getElementById("subtitleViewport");
 
 const videoFile = document.getElementById("videoFile");
-const vttFile = document.getElementById("vttFile");
+const subFile = document.getElementById("vttFile");
 const hint = document.getElementById("hint");
 
-// custom controls
+// HUD
+const hud = document.getElementById("hud");
 const btnPlay = document.getElementById("btnPlay");
 const btnBack = document.getElementById("btnBack");
 const btnFwd = document.getElementById("btnFwd");
@@ -31,9 +32,20 @@ const aspectSel = document.getElementById("aspect");
 const curTime = document.getElementById("curTime");
 const durTime = document.getElementById("durTime");
 
+// Subtitle settings (top-right)
+const btnSubSettings = document.getElementById("btnSubSettings");
+const subPanel = document.getElementById("subPanel");
+const btnSubClose = document.getElementById("btnSubClose");
+const nudgeUp = document.getElementById("nudgeUp");
+const nudgeLeft = document.getElementById("nudgeLeft");
+const nudgeRight = document.getElementById("nudgeRight");
+const nudgeDown = document.getElementById("nudgeDown");
+const offXEl = document.getElementById("offX");
+const offYEl = document.getElementById("offY");
+
 let captionsEnabled = true;
 
-// cues: {index,id,start,end,settings,text,hasInline}
+// cues: {index,id,start,end,settings,text,hasInline,kind}
 let cues = [];
 let vttStyleText = "";
 
@@ -51,15 +63,125 @@ let videoAspect = 16 / 9;
 let activeAspect = 16 / 9;
 
 // ==========================
-// ★見た目補正（ここだけいじればOK）
-// 右下にズレるなら「左上へ」＝マイナスにする
+// Offset tuning (5px step) + persistence
 // ==========================
-const SUB_OFFSET_PX = { x: -65, y: -63 }; // ←ここ調整（例：-6,-4 / -10,-8 など）
-const SUB_OFFSET_PC = { x: 0, y: 0 };   // 例: {x:-0.2, y:-0.15}（%補正したい時）
+const OFFSET_STEP = 5;
+const OFFSET_STORAGE_KEY = "perfectVttOffset_v3";
+const DEFAULT_OFFSET = { x: -80, y: -78 };
+const SUB_OFFSET_PC = { x: 0, y: 0 };
 
-// ----------------------------
+let subOffset = loadOffset();
+
+function loadOffset() {
+  try {
+    const raw = localStorage.getItem(OFFSET_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_OFFSET };
+    const obj = JSON.parse(raw);
+    const x = Number(obj?.x);
+    const y = Number(obj?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { ...DEFAULT_OFFSET };
+    return { x, y };
+  } catch {
+    return { ...DEFAULT_OFFSET };
+  }
+}
+function saveOffset() {
+  try { localStorage.setItem(OFFSET_STORAGE_KEY, JSON.stringify(subOffset)); } catch {}
+}
+function updateOffsetUI() {
+  offXEl.textContent = String(Math.round(subOffset.x));
+  offYEl.textContent = String(Math.round(subOffset.y));
+}
+function nudge(dx, dy) {
+  subOffset.x += dx;
+  subOffset.y += dy;
+  updateOffsetUI();
+  saveOffset();
+  lastSubKey = "";
+  renderSubtitles(video.currentTime || 0);
+}
+nudgeUp.addEventListener("click", () => nudge(0, -OFFSET_STEP));
+nudgeDown.addEventListener("click", () => nudge(0, OFFSET_STEP));
+nudgeLeft.addEventListener("click", () => nudge(-OFFSET_STEP, 0));
+nudgeRight.addEventListener("click", () => nudge(OFFSET_STEP, 0));
+updateOffsetUI();
+
+// ==========================
+// Subtitle settings panel toggle
+// ==========================
+let subPanelOpen = false;
+
+function setSubPanelOpen(open) {
+  subPanelOpen = open;
+  btnSubSettings.classList.toggle("is-active", open);
+  btnSubSettings.setAttribute("aria-expanded", String(open));
+
+  subPanel.classList.toggle("is-hidden", !open);
+  subPanel.setAttribute("aria-hidden", String(!open));
+  // HUDも「触った扱い」で再表示
+  userActivity();
+}
+
+btnSubSettings.addEventListener("click", (e) => {
+  e.stopPropagation();
+  setSubPanelOpen(!subPanelOpen);
+});
+
+btnSubClose.addEventListener("click", (e) => {
+  e.stopPropagation();
+  setSubPanelOpen(false);
+});
+
+// 初期は閉じる
+subPanel.classList.add("is-hidden");
+subPanel.setAttribute("aria-hidden", "true");
+
+// 外側クリックで閉じる（プレイヤー内）
+player.addEventListener("pointerdown", (e) => {
+  const t = e.target;
+  if (!subPanelOpen) return;
+  if (t.closest("#subPanel") || t.closest("#btnSubSettings")) return;
+  setSubPanelOpen(false);
+}, { capture: true });
+
+// ==========================
+// HUD auto-hide (3s idle)
+// ==========================
+const HUD_IDLE_MS = 3000;
+let hudTimer = null;
+
+function showHUD() {
+  hud.classList.remove("hud-hidden");
+}
+function hideHUD() {
+  if (video.paused) return; // paused中は消さない
+  hud.classList.add("hud-hidden");
+}
+function scheduleHideHUD() {
+  clearTimeout(hudTimer);
+  if (video.paused) return; // paused中はタイマー不要
+  hudTimer = setTimeout(() => hideHUD(), HUD_IDLE_MS);
+}
+function userActivity() {
+  showHUD();
+  scheduleHideHUD();
+}
+
+// 触れたらHUD復帰
+// iOSでも効くように pointer/touch を広めに拾う
+["pointermove", "pointerdown", "touchstart", "touchmove", "wheel"].forEach((ev) => {
+  player.addEventListener(ev, userActivity, { passive: true });
+});
+document.addEventListener("keydown", userActivity, { passive: true });
+
+// 再生状態に応じてHUD制御
+video.addEventListener("play", () => { showHUD(); scheduleHideHUD(); });
+video.addEventListener("pause", () => { showHUD(); clearTimeout(hudTimer); });
+video.addEventListener("ended", () => { showHUD(); clearTimeout(hudTimer); });
+
+// ==========================
 // Keep --topbar-h accurate
-// ----------------------------
+// ==========================
 const topbar = document.querySelector(".topbar");
 function updateTopbarVar() {
   const h = topbar?.getBoundingClientRect().height || 64;
@@ -122,33 +244,56 @@ videoFile.addEventListener("change", () => {
   video.load();
   hint.style.display = "none";
   lastSubKey = "";
+  userActivity();
 });
 
-vttFile.addEventListener("change", async () => {
-  const f = vttFile.files?.[0];
+subFile.addEventListener("change", async () => {
+  const f = subFile.files?.[0];
   if (!f) return;
 
   const text = await f.text();
-  const parsed = parseWebVTT(text);
+  const kind = detectSubtitleFormat(text, f.name);
 
-  cues = parsed.cues;
-  vttStyleText = parsed.styleCss;
-  styleEl.textContent = transformVttCssToOverlayCss(vttStyleText);
+  if (kind === "vtt") {
+    const parsed = parseWebVTT(text);
+    cues = parsed.cues;
+    vttStyleText = parsed.styleCss;
+    styleEl.textContent = transformVttCssToOverlayCss(vttStyleText);
+  } else {
+    cues = parseSRT(text);
+    vttStyleText = "";
+    styleEl.textContent = "";
+  }
 
   lastSubKey = "";
   subtitleViewport.innerHTML = "";
   hint.style.display = "none";
+  userActivity();
 });
 
+function detectSubtitleFormat(text, name = "") {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".vtt")) return "vtt";
+  if (lower.endsWith(".srt")) return "srt";
+
+  const t = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trimStart();
+  if (t.startsWith("WEBVTT")) return "vtt";
+
+  const srtLike = /^\s*\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+\d{2}:\d{2}:\d{2},\d{3}/m.test(t);
+  const vttLike = /^\s*\d{2}:\d{2}:\d{2}\.\d{3}\s+-->\s+\d{2}:\d{2}:\d{2}\.\d{3}/m.test(t);
+
+  if (vttLike) return "vtt";
+  if (srtLike) return "srt";
+  return "vtt";
+}
+
 video.addEventListener("loadedmetadata", () => {
-  if (video.videoWidth && video.videoHeight) {
-    videoAspect = video.videoWidth / video.videoHeight;
-  }
+  if (video.videoWidth && video.videoHeight) videoAspect = video.videoWidth / video.videoHeight;
   activeAspect = parseAspectValue(aspectSel.value);
   layoutFrame();
   syncDurationUI();
+  userActivity();
 });
-
 video.addEventListener("loadeddata", () => layoutFrame());
 video.addEventListener("playing", () => layoutFrame());
 
@@ -162,24 +307,26 @@ btnPlay.addEventListener("click", async () => {
   } else {
     video.pause();
   }
+  userActivity();
 });
 
-btnBack.addEventListener("click", () => { video.currentTime = Math.max(0, video.currentTime - 5); });
-
+btnBack.addEventListener("click", () => { video.currentTime = Math.max(0, video.currentTime - 5); userActivity(); });
 btnFwd.addEventListener("click", () => {
   const d = Number.isFinite(video.duration) ? video.duration : Infinity;
   video.currentTime = Math.min(d, video.currentTime + 5);
+  userActivity();
 });
 
-btnMute.addEventListener("click", () => { video.muted = !video.muted; syncVolumeUI(); });
+btnMute.addEventListener("click", () => { video.muted = !video.muted; syncVolumeUI(); userActivity(); });
 
 vol.addEventListener("input", () => {
   video.volume = Number(vol.value);
   video.muted = (video.volume === 0);
   syncVolumeUI();
+  userActivity();
 });
 
-speed.addEventListener("change", () => { video.playbackRate = Number(speed.value); });
+speed.addEventListener("change", () => { video.playbackRate = Number(speed.value); userActivity(); });
 
 btnFS.addEventListener("click", async () => {
   if (!document.fullscreenElement) {
@@ -187,12 +334,14 @@ btnFS.addEventListener("click", async () => {
   } else {
     try { await document.exitFullscreen(); } catch {}
   }
+  userActivity();
 });
 
 btnCC.addEventListener("click", () => {
   captionsEnabled = !captionsEnabled;
   if (!captionsEnabled) subtitleViewport.innerHTML = "";
   lastSubKey = "";
+  userActivity();
 });
 
 video.addEventListener("play", syncPlayUI);
@@ -225,18 +374,28 @@ seek.addEventListener("input", () => {
   const d = Number.isFinite(video.duration) ? video.duration : 0;
   const p = Number(seek.value) / 1000;
   curTime.textContent = formatTime(d * p);
+  userActivity();
 });
 seek.addEventListener("change", () => {
   const d = Number.isFinite(video.duration) ? video.duration : 0;
   const p = Number(seek.value) / 1000;
   video.currentTime = d * p;
   isSeeking = false;
+  userActivity();
 });
 
-// Click to toggle play (avoid HUD clicks)
+// Click to toggle play (avoid UI clicks)
 player.addEventListener("click", (e) => {
   const el = e.target;
-  if (el.closest(".hud") || el.closest(".topbar")) return;
+  if (
+    el.closest(".hud") ||
+    el.closest(".topbar") ||
+    el.closest(".sub-ui") ||
+    el.closest("#subPanel") ||
+    el.closest("#btnSubSettings")
+  ) return;
+
+  // ただのクリックで再生/停止
   btnPlay.click();
 });
 
@@ -342,6 +501,7 @@ function parseWebVTT(input) {
       settings: parsedSettings,
       text: rawText,
       hasInline,
+      kind: "vtt",
     });
 
     i++;
@@ -373,7 +533,73 @@ function parseVttTime(t) {
 }
 
 // ==========================
-// Cue settings
+// SRT parsing (simple)
+// ==========================
+function parseSRT(input) {
+  const text = input.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!text) return [];
+
+  const blocks = text.split(/\n{2,}/);
+  const out = [];
+  let idx = 0;
+
+  for (const b of blocks) {
+    const lines = b.split("\n").map(l => l.trimEnd());
+    if (!lines.length) continue;
+
+    let p = 0;
+    if (/^\d+$/.test(lines[p]?.trim() || "")) p++;
+
+    const timeLine = lines[p] || "";
+    const m = timeLine.match(
+      /^(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/
+    );
+    if (!m) continue;
+
+    const start = parseSrtTime(m[1]);
+    const end = parseSrtTime(m[2]);
+
+    p++;
+    const payload = lines.slice(p).join("\n").trim();
+    if (!payload) continue;
+
+    out.push({
+      index: idx++,
+      id: null,
+      start,
+      end,
+      settings: {
+        vertical: null,
+        line: "auto",
+        lineAlign: "start",
+        position: "auto",
+        positionAlign: "auto",
+        size: 100,
+        align: "center",
+        hasSize: false,
+      },
+      text: payload,
+      hasInline: false,
+      kind: "srt",
+    });
+  }
+
+  out.sort((a, b) => (a.start - b.start) || (a.index - b.index));
+  return out;
+}
+
+function parseSrtTime(t) {
+  const m = t.match(/^(\d{2}):(\d{2}):(\d{2}),(\d{3})$/);
+  if (!m) return 0;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  const ss = Number(m[3]);
+  const ms = Number(m[4]);
+  return hh * 3600 + mm * 60 + ss + ms / 1000;
+}
+
+// ==========================
+// Cue settings (VTT)
 // ==========================
 function parseCueSettings(settingsStr) {
   const out = {
@@ -386,7 +612,6 @@ function parseCueSettings(settingsStr) {
     align: "center",
     hasSize: false,
   };
-
   if (!settingsStr) return out;
 
   const parts = settingsStr.split(/\s+/).filter(Boolean);
@@ -464,7 +689,7 @@ function escapeCssIdent(s) {
 }
 
 // ==========================
-// Cue text tags + inline timestamps
+// Text handling
 // ==========================
 function decodeEntities(str) {
   const ta = document.createElement("textarea");
@@ -561,6 +786,47 @@ function vttToHtml(rawText, tNow) {
   return out.replace(/\n/g, "<br>");
 }
 
+function srtToHtml(rawText) {
+  const allowed = new Set(["b", "i", "u"]);
+  const tagRe = /<\/?[^>]+>/g;
+
+  let out = "";
+  let last = 0;
+  const stack = [];
+
+  const flushText = (s) => { out += escapeHtml(s); };
+
+  for (const m of rawText.matchAll(tagRe)) {
+    const idx = m.index;
+    const tag = m[0];
+
+    flushText(rawText.slice(last, idx));
+    last = idx + tag.length;
+
+    if (tag.startsWith("</")) {
+      const name = tag.slice(2, -1).trim().toLowerCase();
+      if (!allowed.has(name)) { flushText(tag); continue; }
+      while (stack.length) {
+        const top = stack.pop();
+        out += `</${top.name}>`;
+        if (top.name === name) break;
+      }
+      continue;
+    }
+
+    const inside = tag.slice(1, -1).trim().toLowerCase();
+    const name = (inside.split(/\s+/)[0] || "").trim();
+    if (!allowed.has(name)) { flushText(tag); continue; }
+
+    out += `<${name}>`;
+    stack.push({ name });
+  }
+
+  flushText(rawText.slice(last));
+  while (stack.length) out += `</${stack.pop().name}>`;
+  return out.replace(/\n/g, "<br>");
+}
+
 function parseStartTag(inside) {
   const parts = inside.split(/\s+/);
   const head = parts[0] || "";
@@ -594,7 +860,6 @@ function openHtmlFor(node) {
     default: return "";
   }
 }
-
 function closeHtmlFor(node) {
   switch (node.name) {
     case "b": return "</b>";
@@ -610,7 +875,7 @@ function closeHtmlFor(node) {
 }
 
 // ==========================
-// Subtitle rendering (★オフセット適用)
+// Subtitle rendering
 // ==========================
 function renderSubtitles(t) {
   if (!cues.length || !Number.isFinite(t)) {
@@ -623,9 +888,8 @@ function renderSubtitles(t) {
   const H = frame.clientHeight || 0;
   if (!W || !H) return;
 
-  // ★字幕をわざと左上へ（%補正も可）
-  const ox = SUB_OFFSET_PX.x + (W * (SUB_OFFSET_PC.x / 100));
-  const oy = SUB_OFFSET_PX.y + (H * (SUB_OFFSET_PC.y / 100));
+  const ox = subOffset.x + (W * (SUB_OFFSET_PC.x / 100));
+  const oy = subOffset.y + (H * (SUB_OFFSET_PC.y / 100));
 
   const active = getActiveCues(t);
   if (!active.length) {
@@ -642,7 +906,7 @@ function renderSubtitles(t) {
 
   subtitleViewport.innerHTML = active.map((c) => {
     const box = computeBoxStyle(c.settings, W, H, ox, oy);
-    const content = vttToHtml(c.text, t);
+    const content = (c.kind === "srt") ? srtToHtml(c.text) : vttToHtml(c.text, t);
     const extraClass = c.settings.hasSize ? "" : " cue-default-font";
 
     return `
@@ -688,8 +952,7 @@ function getActiveCues(t) {
 }
 
 // ==========================
-// WebVTT position math (★ox/oyを加算)
-// clampは「補正前」にだけ適用（補正で枠外に出てもOK＝見た目優先）
+// WebVTT position math (ox/oy added at the end)
 // ==========================
 function percentOrDefault(v, dflt) {
   if (v == null || v === "auto") return dflt;
@@ -760,7 +1023,6 @@ function computeBoxStyle(s, W, H, ox, oy) {
       }
     }
 
-    // ★補正を最後に加算
     leftPx += ox;
     yPx += oy;
 
@@ -775,7 +1037,6 @@ function computeBoxStyle(s, W, H, ox, oy) {
     };
   }
 
-  // vertical writing mode
   const regionH = (H * sizePct) / 100;
   const y = (H * posPct) / 100;
 
@@ -807,7 +1068,6 @@ function computeBoxStyle(s, W, H, ox, oy) {
     }
   }
 
-  // ★補正
   xPx += ox;
   topPx += oy;
 
@@ -821,5 +1081,3 @@ function computeBoxStyle(s, W, H, ox, oy) {
     writingMode,
   };
 }
-
-
